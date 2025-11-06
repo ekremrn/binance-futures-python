@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "binance-futures-python"
+version = "0.1.0"
+description = "REST client for Binance USDⓈ-M Futures with automatic signing and environment toggling."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Codex", email = "ekremezm@gmail.com"}
+]
+keywords = ["binance", "futures", "trading", "api", "usdt-m"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "License :: OSI Approved :: MIT License",
+    "Intended Audience :: Developers",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "requests>=2.31.0",
+]
+
+[project.urls]
+Homepage = "https://www.binance.com/en/futures"
+Documentation = "https://developers.binance.com/docs/derivatives/usds-margined-futures"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["binance_futures_python*"]
+
