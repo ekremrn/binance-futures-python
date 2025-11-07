@@ -321,5 +321,21 @@ class BinanceFuturesClient:
             payload = response.json()
         except ValueError:
             payload = response.text or "<empty>"
-        message = payload.get("msg") if isinstance(payload, dict) else str(payload)
-        raise BinanceFuturesAPIError(message or "Binance API error", response.status_code, response, payload)
+        
+        # Extract error message from various possible keys
+        if isinstance(payload, dict):
+            message = (
+                payload.get("msg") or 
+                payload.get("message") or 
+                payload.get("error") or
+                str(payload)
+            )
+        else:
+            message = str(payload)
+            
+        raise BinanceFuturesAPIError(
+            message or "Binance API error", 
+            response.status_code, 
+            response, 
+            payload
+        )
