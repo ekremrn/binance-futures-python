@@ -143,6 +143,78 @@ class BinanceFuturesClient:
     def get_open_interest(self, symbol: str) -> Dict[str, Any]:
         return self._request("GET", "/fapi/v1/openInterest", params={"symbol": symbol})
 
+    def get_open_interest_history(
+        self,
+        symbol: str,
+        period: str = "5m",
+        limit: Optional[int] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Fetch open interest history (statistics endpoint)."""
+        params = {
+            "symbol": symbol,
+            "period": period,
+            "limit": limit,
+            "startTime": start_time,
+            "endTime": end_time,
+        }
+        return self._request("GET", "/futures/data/openInterestHist", params=params)
+
+    def get_long_short_ratio(
+        self,
+        symbol: str,
+        period: str = "5m",
+        limit: Optional[int] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Fetch long/short account ratio."""
+        params = {
+            "symbol": symbol,
+            "period": period,
+            "limit": limit,
+            "startTime": start_time,
+            "endTime": end_time,
+        }
+        return self._request("GET", "/futures/data/globalLongShortAccountRatio", params=params)
+
+    def get_top_trader_long_short_ratio(
+        self,
+        symbol: str,
+        period: str = "5m",
+        limit: Optional[int] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Fetch top trader long/short account ratio."""
+        params = {
+            "symbol": symbol,
+            "period": period,
+            "limit": limit,
+            "startTime": start_time,
+            "endTime": end_time,
+        }
+        return self._request("GET", "/futures/data/topLongShortAccountRatio", params=params)
+
+    def get_taker_buy_sell_volume(
+        self,
+        symbol: str,
+        period: str = "5m",
+        limit: Optional[int] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Fetch taker buy/sell volume ratio."""
+        params = {
+            "symbol": symbol,
+            "period": period,
+            "limit": limit,
+            "startTime": start_time,
+            "endTime": end_time,
+        }
+        return self._request("GET", "/futures/data/takerlongshortRatio", params=params)
+
     # ---------------------------------------------------------------------
     # Trading (SIGNED)
     # ---------------------------------------------------------------------
