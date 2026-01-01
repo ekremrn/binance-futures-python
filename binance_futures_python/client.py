@@ -6,11 +6,12 @@ and exposes helpers for common trading, account, and user-stream workflows.
 """
 from __future__ import annotations
 
+import json
 import hashlib
 import hmac
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
 import requests
@@ -36,11 +37,28 @@ class BinanceFuturesAPIError(RuntimeError):
             self.error_code = payload.get("code")
 
 
+class ConditionalOrderMigratedError(BinanceFuturesAPIError):
+    """Raised when conditional orders hit the legacy endpoint instead of Algo."""
+
+
 class BinanceFuturesClient:
     """REST client for Binance USDⓈ-M Futures (USDT margined)."""
 
     MAINNET_URL = "https://fapi.binance.com"
     TESTNET_URL = "https://demo-fapi.binance.com"
+    CONDITIONAL_ORDER_TYPES = {
+        "STOP_MARKET",
+        "TAKE_PROFIT_MARKET",
+        "STOP",
+        "TAKE_PROFIT",
+        "TRAILING_STOP_MARKET",
+    }
+    ORDER_NOT_FOUND_CODES = {-2013, -2011}
+    ERROR_HINTS = {
+        -4120: "Conditional orders migrated to Algo Service; use /fapi/v1/algoOrder (effective 2025-12-09).",
+        -4116: "Duplicate clientOrderId; supply a unique client order id.",
+        -4117: "Stop order already triggering; retry is not allowed during trigger.",
+    }
 
     def __init__(
         self,
@@ -52,6 +70,8 @@ class BinanceFuturesClient:
         timeout: int = 10,
         max_retries: int = 3,
         session: Optional[Session] = None,
+        auto_switch_conditional_to_algo: bool = True,
+        attempt_algo_on_not_found: bool = False,
     ) -> None:
         self.api_key = api_key
         self.api_secret = api_secret
@@ -59,6 +79,8 @@ class BinanceFuturesClient:
         self.timeout = timeout
         self.base_url = self.TESTNET_URL if use_testnet else self.MAINNET_URL
         self.session = session or requests.Session()
+        self.auto_switch_conditional_to_algo = auto_switch_conditional_to_algo
+        self.attempt_algo_on_not_found = attempt_algo_on_not_found
 
         retry = Retry(
             total=max_retries,
@@ -229,11 +251,78 @@ class BinanceFuturesClient:
 
     def new_order(self, **params: Any) -> Dict[str, Any]:
         self._ensure_required(params, ("symbol", "side", "type"))
-        return self._request("POST", "/fapi/v1/order", params=params, signed=True)
+        order_type = self._normalize_order_type(params.get("type"))
+        params["type"] = order_type
+        force_rest_route = bool(params.pop("_force_rest_route", False))
+
+        if self.auto_switch_conditional_to_algo and self._is_conditional_type(order_type) and not force_rest_route:
+            return self.new_algo_order(**params)
+
+        try:
+            return self._request("POST", "/fapi/v1/order", params=params, signed=True)
+        except BinanceFuturesAPIError as exc:
+            if exc.error_code == -4120 and self.auto_switch_conditional_to_algo:
+                _logger.info("Retrying conditional order via algo endpoint after STOP_ORDER_SWITCH_ALGO")
+                return self.new_algo_order(**params)
+            raise
 
     def new_test_order(self, **params: Any) -> Dict[str, Any]:
         self._ensure_required(params, ("symbol", "side", "type"))
+        order_type = self._normalize_order_type(params.get("type"))
+        if self._is_conditional_type(order_type):
+            raise ValueError(
+                "Conditional orders migrated to Algo Service; Binance does not provide /order/test for these types. "
+                "Use new_algo_order/new_stop_loss_order/new_take_profit_order instead."
+            )
+
+        params["type"] = order_type
         return self._request("POST", "/fapi/v1/order/test", params=params, signed=True)
+
+    def new_batch_orders(self, orders: List[Dict[str, Any]], *, auto_split_conditional: bool = True, **params: Any) -> Dict[str, Any]:
+        """
+        Create multiple orders in a single request, safely handling conditional order migration.
+
+        If any order in the batch is a conditional type, it will be sent individually to the
+        algo endpoint when auto_split_conditional=True. Set auto_split_conditional=False to
+        raise when conditional types are found.
+        """
+        if not orders:
+            raise ValueError("orders list is required for batch placement.")
+
+        conditional_orders: List[Dict[str, Any]] = []
+        regular_orders: List[Dict[str, Any]] = []
+        shared_params = {k: v for k, v in params.items() if v is not None}
+
+        for order in orders:
+            if not isinstance(order, dict):
+                raise ValueError("Each order must be a dict of order parameters.")
+
+            order_copy = order.copy()
+            self._ensure_required(order_copy, ("symbol", "side", "type"))
+            order_copy["type"] = self._normalize_order_type(order_copy.get("type"))
+
+            if self._is_conditional_type(order_copy["type"]):
+                conditional_orders.append(order_copy)
+            else:
+                regular_orders.append(order_copy)
+
+        result: Dict[str, Any] = {"regular": None, "conditional": []}
+
+        if conditional_orders and not auto_split_conditional:
+            raise ValueError(
+                "Batch contains conditional order types. Route them via the Algo endpoint or enable auto_split_conditional."
+            )
+
+        if regular_orders:
+            payload = {"batchOrders": json.dumps(regular_orders), **shared_params}
+            result["regular"] = self._request("POST", "/fapi/v1/batchOrders", params=payload, signed=True)
+
+        if conditional_orders:
+            for order in conditional_orders:
+                order_payload = {**shared_params, **order}
+                result["conditional"].append(self.new_algo_order(**order_payload))
+
+        return result
 
     # ---------------------------------------------------------------------
     # Stop-loss and Take-profit Orders (SIGNED)
@@ -416,6 +505,7 @@ class BinanceFuturesClient:
         
         # Apply guardrails for closePosition and Hedge Mode
         params = self._prepare_algo_order_params(params.copy())
+        params["type"] = self._normalize_order_type(params["type"])
         
         # MANDATORY: algoType must be "CONDITIONAL" for /fapi/v1/algoOrder
         # This is required by Binance and currently only supports "CONDITIONAL"
@@ -429,7 +519,10 @@ class BinanceFuturesClient:
             params.get("algoType")
         )
         
-        return self._request("POST", "/fapi/v1/algoOrder", params=params, signed=True)
+        response = self._request("POST", "/fapi/v1/algoOrder", params=params, signed=True)
+        if isinstance(response, dict):
+            response["_via_algo_api"] = True
+        return response
 
     def cancel_algo_order(self, **params: Any) -> Dict[str, Any]:
         """
@@ -449,6 +542,15 @@ class BinanceFuturesClient:
         """
         self._ensure_required(params, ("symbol", "algoId"))
         return self._request("DELETE", "/fapi/v1/algoOrder", params=params, signed=True)
+
+    def cancel_open_algo_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Cancel all open algo orders (optionally scoped to a symbol).
+        """
+        params: Dict[str, Any] = {}
+        if symbol:
+            params["symbol"] = symbol
+        return self._request("DELETE", "/fapi/v1/algoOpenOrders", params=params, signed=True)
 
     def query_algo_order(self, **params: Any) -> Dict[str, Any]:
         """
@@ -477,6 +579,10 @@ class BinanceFuturesClient:
             params["symbol"] = symbol
         return self._request("GET", "/fapi/v1/openAlgoOrders", params=params, signed=True)
 
+    def open_algo_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """Alias for get_open_algo_orders."""
+        return self.get_open_algo_orders(symbol=symbol)
+
     def get_algo_order_history(self, **params: Any) -> Dict[str, Any]:
         """
         Get algo order history.
@@ -493,13 +599,41 @@ class BinanceFuturesClient:
         """
         return self._request("GET", "/fapi/v1/allAlgoOrders", params=params, signed=True)
 
-    def query_order(self, **params: Any) -> Dict[str, Any]:
-        self._ensure_required(params, ("symbol",))
-        return self._request("GET", "/fapi/v1/order", params=params, signed=True)
+    def all_algo_orders(self, **params: Any) -> Dict[str, Any]:
+        """Alias for get_algo_order_history."""
+        return self.get_algo_order_history(**params)
 
-    def cancel_order(self, **params: Any) -> Dict[str, Any]:
+    def query_order(self, allow_algo_fallback: Optional[bool] = None, **params: Any) -> Dict[str, Any]:
+        algo_id = params.pop("algoOrderId", None) or params.pop("algoId", None)
+        prefer_algo_direct = algo_id is not None and not params.get("orderId") and not params.get("origClientOrderId")
+        fallback_enabled = self.attempt_algo_on_not_found if allow_algo_fallback is None else allow_algo_fallback
+
+        if prefer_algo_direct:
+            return self.query_algo_order(algoId=algo_id, symbol=params.get("symbol"))
+
         self._ensure_required(params, ("symbol",))
-        return self._request("DELETE", "/fapi/v1/order", params=params, signed=True)
+        try:
+            return self._request("GET", "/fapi/v1/order", params=params, signed=True)
+        except BinanceFuturesAPIError as exc:
+            if fallback_enabled and algo_id is not None and self._is_order_not_found(exc):
+                return self.query_algo_order(algoId=algo_id, symbol=params.get("symbol"))
+            raise
+
+    def cancel_order(self, allow_algo_fallback: Optional[bool] = None, **params: Any) -> Dict[str, Any]:
+        algo_id = params.pop("algoOrderId", None) or params.pop("algoId", None)
+        prefer_algo_direct = algo_id is not None and not params.get("orderId") and not params.get("origClientOrderId")
+        fallback_enabled = self.attempt_algo_on_not_found if allow_algo_fallback is None else allow_algo_fallback
+
+        if prefer_algo_direct:
+            return self.cancel_algo_order(symbol=params.get("symbol"), algoId=algo_id)
+
+        self._ensure_required(params, ("symbol",))
+        try:
+            return self._request("DELETE", "/fapi/v1/order", params=params, signed=True)
+        except BinanceFuturesAPIError as exc:
+            if fallback_enabled and algo_id is not None and self._is_order_not_found(exc):
+                return self.cancel_algo_order(symbol=params.get("symbol"), algoId=algo_id)
+            raise
 
     def cancel_all_open_orders(self, symbol: str) -> Dict[str, Any]:
         return self._request("DELETE", "/fapi/v1/allOpenOrders", params={"symbol": symbol}, signed=True)
@@ -707,12 +841,32 @@ class BinanceFuturesClient:
                 payload.get("error") or
                 str(payload)
             )
+            error_code = payload.get("code")
         else:
             message = str(payload)
+            error_code = None
+        
+        hint = self.ERROR_HINTS.get(error_code)
+        if hint:
+            message = f"{message} | Hint: {hint}"
+        
+        exc_class = ConditionalOrderMigratedError if error_code == -4120 else BinanceFuturesAPIError
             
-        raise BinanceFuturesAPIError(
+        raise exc_class(
             message or "Binance API error", 
             response.status_code, 
             response, 
             payload
         )
+
+    def _is_conditional_type(self, order_type: Optional[str]) -> bool:
+        if not order_type:
+            return False
+        return self._normalize_order_type(order_type) in self.CONDITIONAL_ORDER_TYPES
+
+    @staticmethod
+    def _normalize_order_type(order_type: Any) -> str:
+        return str(order_type).upper()
+
+    def _is_order_not_found(self, exc: BinanceFuturesAPIError) -> bool:
+        return getattr(exc, "error_code", None) in self.ORDER_NOT_FOUND_CODES or exc.status_code == 404

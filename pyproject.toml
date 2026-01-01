@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "binance-futures-python"
-version = "0.1.0"
+version = "0.2.0"
 description = "REST client for Binance USDⓈ-M Futures with automatic signing and environment toggling."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -32,4 +32,3 @@ Documentation = "https://developers.binance.com/docs/derivatives/usds-margined-f
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["binance_futures_python*"]
-
