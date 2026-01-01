@@ -5,6 +5,8 @@ Tests verify:
 - Conditional orders route to /fapi/v1/algoOrder
 - Non-conditional orders route to /fapi/v1/order
 - Proper handling of algoId vs orderId
+- Mandatory algoType="CONDITIONAL" is included in all algo order calls
+- Guardrails for closePosition and Hedge Mode
 - Error handling and logging
 """
 import unittest
@@ -65,6 +67,11 @@ class TestAlgoOrderAPI(unittest.TestCase):
         self.assertEqual(call_args[0][0], "POST")
         self.assertEqual(call_args[0][1], "/fapi/v1/algoOrder")
         self.assertTrue(call_args[1]["signed"])
+        
+        # CRITICAL: Verify algoType="CONDITIONAL" is included (mandatory param)
+        params = call_args[1]["params"]
+        self.assertEqual(params["algoType"], "CONDITIONAL",
+            "algoType='CONDITIONAL' is MANDATORY for /fapi/v1/algoOrder")
         
         # Verify params include type=STOP_MARKET
         params = call_args[1]["params"]
@@ -280,6 +287,258 @@ class TestOrderIDFormatting(unittest.TestCase):
             order_id = f"order:{response.get('orderId')}"
         
         self.assertEqual(order_id, "order:98765")
+
+
+class TestAlgoTypeConditional(unittest.TestCase):
+    """
+    Test suite verifying algoType='CONDITIONAL' is ALWAYS included in algo order payloads.
+    
+    This is the critical fix for:
+    "Mandatory parameter 'algotype' was not sent, was empty/null, or malformed."
+    """
+    
+    def setUp(self):
+        """Set up test client."""
+        self.client = BinanceFuturesClient(
+            api_key="test_key",
+            api_secret="test_secret",
+            use_testnet=True
+        )
+    
+    @patch('binance_futures_python.client.BinanceFuturesClient._request')
+    def test_algo_order_includes_algo_type_conditional(self, mock_request):
+        """
+        Test that new_algo_order ALWAYS includes algoType='CONDITIONAL'.
+        
+        This is the root cause fix for the Binance error:
+        "Mandatory parameter 'algotype' was not sent, was empty/null, or malformed."
+        """
+        mock_request.return_value = {"algoId": 12345, "success": True}
+        
+        self.client.new_algo_order(
+            symbol="BTCUSDT",
+            side="SELL",
+            type="STOP_MARKET",
+            stopPrice=50000.0,
+            quantity=0.1
+        )
+        
+        call_args = mock_request.call_args
+        params = call_args[1]["params"]
+        
+        # THE KEY ASSERTION: algoType MUST be "CONDITIONAL"
+        self.assertIn("algoType", params, 
+            "algoType parameter is MISSING from request - this is the root cause!")
+        self.assertEqual(params["algoType"], "CONDITIONAL",
+            "algoType must be 'CONDITIONAL' - Binance only supports this value")
+    
+    @patch('binance_futures_python.client.BinanceFuturesClient._request')
+    def test_stop_loss_order_includes_algo_type_conditional(self, mock_request):
+        """Test that stop-loss orders include algoType='CONDITIONAL'."""
+        mock_request.return_value = {"algoId": 12345, "success": True}
+        
+        self.client.new_stop_loss_order(
+            symbol="ETHUSDT",
+            side="SELL",
+            stopPrice=2000.0,
+            quantity=1.0
+        )
+        
+        params = mock_request.call_args[1]["params"]
+        self.assertEqual(params["algoType"], "CONDITIONAL")
+        self.assertEqual(params["type"], "STOP_MARKET")
+    
+    @patch('binance_futures_python.client.BinanceFuturesClient._request')
+    def test_take_profit_order_includes_algo_type_conditional(self, mock_request):
+        """Test that take-profit orders include algoType='CONDITIONAL'."""
+        mock_request.return_value = {"algoId": 67890, "success": True}
+        
+        self.client.new_take_profit_order(
+            symbol="ETHUSDT",
+            side="SELL",
+            stopPrice=3000.0,
+            quantity=1.0
+        )
+        
+        params = mock_request.call_args[1]["params"]
+        self.assertEqual(params["algoType"], "CONDITIONAL")
+        self.assertEqual(params["type"], "TAKE_PROFIT_MARKET")
+    
+    @patch('binance_futures_python.client.BinanceFuturesClient._request')
+    def test_trailing_stop_order_includes_algo_type_conditional(self, mock_request):
+        """Test that trailing stop orders include algoType='CONDITIONAL'."""
+        mock_request.return_value = {"algoId": 99999, "success": True}
+        
+        self.client.new_trailing_stop_order(
+            symbol="BTCUSDT",
+            side="SELL",
+            callbackRate=1.5,
+            quantity=0.1
+        )
+        
+        params = mock_request.call_args[1]["params"]
+        self.assertEqual(params["algoType"], "CONDITIONAL")
+        self.assertEqual(params["type"], "TRAILING_STOP_MARKET")
+
+
+class TestAlgoOrderGuardrails(unittest.TestCase):
+    """
+    Test suite for algo order guardrails.
+    
+    Guardrails prevent common API errors:
+    1. closePosition=true + quantity => Error
+    2. closePosition=true + reduceOnly => Error  
+    3. Hedge Mode requires positionSide
+    """
+    
+    def setUp(self):
+        """Set up test client."""
+        self.client = BinanceFuturesClient(
+            api_key="test_key",
+            api_secret="test_secret",
+            use_testnet=True
+        )
+    
+    @patch('binance_futures_python.client.BinanceFuturesClient._request')
+    def test_close_position_removes_quantity(self, mock_request):
+        """Test that closePosition=true removes quantity from params."""
+        mock_request.return_value = {"algoId": 12345, "success": True}
+        
+        # Call with both closePosition=true AND quantity
+        self.client.new_stop_loss_order(
+            symbol="BTCUSDT",
+            side="SELL",
+            stopPrice=50000.0,
+            closePosition="true",
+            quantity=0.1  # Should be REMOVED by guardrail
+        )
+        
+        params = mock_request.call_args[1]["params"]
+        
+        # Quantity should be removed when closePosition=true
+        self.assertNotIn("quantity", params,
+            "quantity must be removed when closePosition=true (Binance rejects it)")
+        self.assertEqual(params["closePosition"], "true")
+    
+    @patch('binance_futures_python.client.BinanceFuturesClient._request')
+    def test_close_position_removes_reduce_only(self, mock_request):
+        """Test that closePosition=true removes reduceOnly from params."""
+        mock_request.return_value = {"algoId": 12345, "success": True}
+        
+        # Call with both closePosition=true AND reduceOnly
+        self.client.new_stop_loss_order(
+            symbol="BTCUSDT",
+            side="SELL",
+            stopPrice=50000.0,
+            closePosition="true",
+            reduceOnly="true"  # Should be REMOVED by guardrail
+        )
+        
+        params = mock_request.call_args[1]["params"]
+        
+        # reduceOnly should be removed when closePosition=true
+        self.assertNotIn("reduceOnly", params,
+            "reduceOnly must be removed when closePosition=true (Binance rejects it)")
+    
+    @patch('binance_futures_python.client.BinanceFuturesClient._request')
+    def test_quantity_preserved_without_close_position(self, mock_request):
+        """Test that quantity is preserved when closePosition is not true."""
+        mock_request.return_value = {"algoId": 12345, "success": True}
+        
+        self.client.new_take_profit_order(
+            symbol="ETHUSDT",
+            side="SELL",
+            stopPrice=3000.0,
+            quantity=1.5,
+            reduceOnly="true"
+        )
+        
+        params = mock_request.call_args[1]["params"]
+        
+        # Quantity and reduceOnly should be preserved
+        self.assertEqual(params["quantity"], 1.5)
+        self.assertEqual(params["reduceOnly"], "true")
+    
+    @patch('binance_futures_python.client.BinanceFuturesClient._request')
+    def test_position_side_passed_for_hedge_mode(self, mock_request):
+        """Test that positionSide is passed through for Hedge Mode."""
+        mock_request.return_value = {"algoId": 12345, "success": True}
+        
+        self.client.new_stop_loss_order(
+            symbol="BTCUSDT",
+            side="SELL",
+            stopPrice=50000.0,
+            quantity=0.1,
+            positionSide="LONG"  # Required for Hedge Mode
+        )
+        
+        params = mock_request.call_args[1]["params"]
+        self.assertEqual(params["positionSide"], "LONG")
+
+
+class TestMockedHTTPAlgoOrder(unittest.TestCase):
+    """
+    Mocked HTTP tests to verify the actual request payload sent to Binance.
+    
+    These tests mock at the HTTP level to verify the exact payload structure.
+    """
+    
+    def setUp(self):
+        """Set up test client with mocked session."""
+        self.mock_session = Mock()
+        self.client = BinanceFuturesClient(
+            api_key="test_api_key",
+            api_secret="test_secret_key_for_signing",
+            use_testnet=True,
+            session=self.mock_session
+        )
+    
+    def test_http_payload_includes_algo_type(self):
+        """
+        Test that the HTTP payload sent to /fapi/v1/algoOrder includes algoType='CONDITIONAL'.
+        
+        This is the definitive test that the bug is fixed - we verify the actual
+        data that would be sent over the wire to Binance.
+        """
+        # Mock successful response
+        mock_response = Mock()
+        mock_response.ok = True
+        mock_response.json.return_value = {
+            "algoId": 14517910,
+            "success": True,
+            "code": 0,
+            "msg": "OK"
+        }
+        self.mock_session.request.return_value = mock_response
+        
+        # Make the call
+        self.client.new_stop_loss_order(
+            symbol="BTCUSDT",
+            side="SELL",
+            stopPrice=50000.0,
+            closePosition="true"
+        )
+        
+        # Verify the HTTP request
+        self.mock_session.request.assert_called_once()
+        call_kwargs = self.mock_session.request.call_args[1]
+        
+        # Verify correct endpoint
+        self.assertIn("/fapi/v1/algoOrder", call_kwargs["url"])
+        
+        # Verify payload contains algoType (POST sends data, not params)
+        payload = call_kwargs["data"]
+        self.assertEqual(payload["algoType"], "CONDITIONAL",
+            "HTTP payload must include algoType='CONDITIONAL'")
+        self.assertEqual(payload["type"], "STOP_MARKET")
+        self.assertEqual(payload["symbol"], "BTCUSDT")
+        self.assertEqual(payload["side"], "SELL")
+        
+        # Verify closePosition is passed
+        self.assertEqual(payload["closePosition"], "true")
+        
+        # Verify quantity is NOT in payload (guardrail for closePosition=true)
+        self.assertNotIn("quantity", payload)
 
 
 if __name__ == "__main__":
