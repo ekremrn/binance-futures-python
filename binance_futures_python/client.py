@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import time
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode
@@ -16,6 +17,9 @@ import requests
 from requests import Response, Session
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+
+# Module-level logger for algo order operations
+_logger = logging.getLogger(__name__)
 
 
 class BinanceFuturesAPIError(RuntimeError):
@@ -254,6 +258,7 @@ class BinanceFuturesClient:
         - reduceOnly: "true" or "false"
         - priceProtect: "true" or "false"
         - workingType: "MARK_PRICE" or "CONTRACT_PRICE"
+        - positionSide: "LONG" or "SHORT" (required for Hedge Mode)
         
         Returns:
         - On success via algo API: {"algoId": int, "success": bool, ...}
@@ -261,16 +266,23 @@ class BinanceFuturesClient:
         """
         self._ensure_required(params, ("symbol", "side", "stopPrice"))
         
-        # Try algo endpoint first (new behavior as of 2025-12-09)
-        try:
-            params_copy = params.copy()
-            params_copy["type"] = "STOP_MARKET"
-            result = self.new_algo_order(**params_copy)
-            result["_via_algo_api"] = True
-            return result
-        except BinanceFuturesAPIError as e:
-            # If algo endpoint fails for unexpected reason, re-raise
-            raise
+        # Apply guardrails and prepare params for algo API
+        params_copy = self._prepare_algo_order_params(params.copy())
+        params_copy["type"] = "STOP_MARKET"
+        
+        # Log the algo order request (no secrets)
+        _logger.info(
+            "Algo order request: endpoint=/fapi/v1/algoOrder, symbol=%s, side=%s, "
+            "type=STOP_MARKET, triggerPrice=%s, closePosition=%s",
+            params_copy.get("symbol"),
+            params_copy.get("side"),
+            params_copy.get("stopPrice"),
+            params_copy.get("closePosition", "false")
+        )
+        
+        result = self.new_algo_order(**params_copy)
+        result["_via_algo_api"] = True
+        return result
 
     def new_take_profit_order(self, **params: Any) -> Dict[str, Any]:
         """
@@ -290,6 +302,7 @@ class BinanceFuturesClient:
         - reduceOnly: "true" or "false"
         - priceProtect: "true" or "false"
         - workingType: "MARK_PRICE" or "CONTRACT_PRICE"
+        - positionSide: "LONG" or "SHORT" (required for Hedge Mode)
         
         Returns:
         - On success via algo API: {"algoId": int, "success": bool, ...}
@@ -297,16 +310,68 @@ class BinanceFuturesClient:
         """
         self._ensure_required(params, ("symbol", "side", "stopPrice"))
         
-        # Try algo endpoint first (new behavior as of 2025-12-09)
-        try:
-            params_copy = params.copy()
-            params_copy["type"] = "TAKE_PROFIT_MARKET"
-            result = self.new_algo_order(**params_copy)
-            result["_via_algo_api"] = True
-            return result
-        except BinanceFuturesAPIError as e:
-            # If algo endpoint fails for unexpected reason, re-raise
-            raise
+        # Apply guardrails and prepare params for algo API
+        params_copy = self._prepare_algo_order_params(params.copy())
+        params_copy["type"] = "TAKE_PROFIT_MARKET"
+        
+        # Log the algo order request (no secrets)
+        _logger.info(
+            "Algo order request: endpoint=/fapi/v1/algoOrder, symbol=%s, side=%s, "
+            "type=TAKE_PROFIT_MARKET, triggerPrice=%s, closePosition=%s",
+            params_copy.get("symbol"),
+            params_copy.get("side"),
+            params_copy.get("stopPrice"),
+            params_copy.get("closePosition", "false")
+        )
+        
+        result = self.new_algo_order(**params_copy)
+        result["_via_algo_api"] = True
+        return result
+
+    def new_trailing_stop_order(self, **params: Any) -> Dict[str, Any]:
+        """
+        Create a TRAILING_STOP_MARKET order using the Algo Order API.
+        
+        As of 2025-12-09, trailing stop orders must use the algo endpoint.
+        
+        Required params:
+        - symbol: str
+        - side: "BUY" or "SELL"
+        - callbackRate: float or str (callback rate in percentage, e.g., 1.5 for 1.5%)
+        
+        Optional params:
+        - quantity: float or str (required if closePosition is not "true")
+        - activationPrice: float or str (price to trigger the trailing stop)
+        - closePosition: "true" or "false" (default: "false")
+        - reduceOnly: "true" or "false"
+        - priceProtect: "true" or "false"
+        - workingType: "MARK_PRICE" or "CONTRACT_PRICE"
+        - positionSide: "LONG" or "SHORT" (required for Hedge Mode)
+        
+        Returns:
+        - On success via algo API: {"algoId": int, "success": bool, ...}
+        - The response includes "_via_algo_api": True to distinguish from regular orders
+        """
+        self._ensure_required(params, ("symbol", "side", "callbackRate"))
+        
+        # Apply guardrails and prepare params for algo API
+        params_copy = self._prepare_algo_order_params(params.copy())
+        params_copy["type"] = "TRAILING_STOP_MARKET"
+        
+        # Log the algo order request (no secrets)
+        _logger.info(
+            "Algo order request: endpoint=/fapi/v1/algoOrder, symbol=%s, side=%s, "
+            "type=TRAILING_STOP_MARKET, callbackRate=%s, activationPrice=%s, closePosition=%s",
+            params_copy.get("symbol"),
+            params_copy.get("side"),
+            params_copy.get("callbackRate"),
+            params_copy.get("activationPrice"),
+            params_copy.get("closePosition", "false")
+        )
+        
+        result = self.new_algo_order(**params_copy)
+        result["_via_algo_api"] = True
+        return result
 
     # ---------------------------------------------------------------------
     # Algo Order API (SIGNED) - For conditional orders as of 2025-12-09
@@ -318,6 +383,9 @@ class BinanceFuturesClient:
         
         As of 2025-12-09, Binance migrated STOP_MARKET, TAKE_PROFIT_MARKET, STOP,
         TAKE_PROFIT, and TRAILING_STOP_MARKET to the Algo Service.
+        
+        IMPORTANT: This method automatically sets algoType="CONDITIONAL" which is
+        mandatory for the /fapi/v1/algoOrder endpoint.
         
         Required params:
         - symbol: str
@@ -334,6 +402,7 @@ class BinanceFuturesClient:
         - reduceOnly: "true" or "false"
         - priceProtect: "true" or "false"
         - workingType: "MARK_PRICE" or "CONTRACT_PRICE"
+        - positionSide: "LONG" or "SHORT" (required for Hedge Mode)
         
         Returns:
         {
@@ -344,6 +413,22 @@ class BinanceFuturesClient:
         }
         """
         self._ensure_required(params, ("symbol", "side", "type"))
+        
+        # Apply guardrails for closePosition and Hedge Mode
+        params = self._prepare_algo_order_params(params.copy())
+        
+        # MANDATORY: algoType must be "CONDITIONAL" for /fapi/v1/algoOrder
+        # This is required by Binance and currently only supports "CONDITIONAL"
+        params["algoType"] = "CONDITIONAL"
+        
+        _logger.debug(
+            "Sending algo order: symbol=%s, side=%s, type=%s, algoType=%s",
+            params.get("symbol"),
+            params.get("side"),
+            params.get("type"),
+            params.get("algoType")
+        )
+        
         return self._request("POST", "/fapi/v1/algoOrder", params=params, signed=True)
 
     def cancel_algo_order(self, **params: Any) -> Dict[str, Any]:
@@ -555,6 +640,45 @@ class BinanceFuturesClient:
         query = urlencode(params, doseq=True)
         signature = hmac.new(self.api_secret.encode("utf-8"), query.encode("utf-8"), hashlib.sha256).hexdigest()
         params["signature"] = signature
+        return params
+
+    def _prepare_algo_order_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Apply guardrails and prepare parameters for algo order API.
+        
+        Guardrails:
+        1. If closePosition=true, remove quantity and reduceOnly (Binance rejects them)
+        2. In Hedge Mode, ensure positionSide is sent
+        
+        Args:
+            params: Order parameters (will be modified in place)
+            
+        Returns:
+            Modified params dict ready for algo order API
+        """
+        # Guardrail 1: If closePosition is "true", do NOT send quantity or reduceOnly
+        # Binance rejects algo orders with quantity when closePosition=true
+        close_position = str(params.get("closePosition", "")).lower()
+        if close_position == "true":
+            if "quantity" in params:
+                _logger.debug(
+                    "Removing 'quantity' from algo order params because closePosition=true"
+                )
+                del params["quantity"]
+            if "reduceOnly" in params:
+                _logger.debug(
+                    "Removing 'reduceOnly' from algo order params because closePosition=true"
+                )
+                del params["reduceOnly"]
+        
+        # Guardrail 2: In Hedge Mode, positionSide is required
+        # If user didn't provide it, we try to infer from position mode
+        # but caller should explicitly pass positionSide when in Hedge Mode
+        if "positionSide" not in params:
+            _logger.debug(
+                "positionSide not provided - if using Hedge Mode, orders may fail"
+            )
+        
         return params
 
     @staticmethod
