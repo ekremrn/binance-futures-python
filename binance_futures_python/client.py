@@ -228,12 +228,12 @@ class BinanceFuturesClient:
         return self._request("POST", "/fapi/v1/order/test", params=params, signed=True)
 
     # ---------------------------------------------------------------------
-    # Algo Orders (SIGNED) - For STOP_MARKET and TAKE_PROFIT_MARKET
+    # Stop-loss and Take-profit Orders (SIGNED)
     # ---------------------------------------------------------------------
 
     def new_stop_loss_order(self, **params: Any) -> Dict[str, Any]:
         """
-        Create a STOP_MARKET order using the Algo Order API.
+        Create a STOP_MARKET order.
         
         Required params:
         - symbol: str
@@ -248,11 +248,12 @@ class BinanceFuturesClient:
         - workingType: "MARK_PRICE" or "CONTRACT_PRICE"
         """
         self._ensure_required(params, ("symbol", "side", "stopPrice"))
-        return self._request("POST", "/fapi/v1/order/stopLoss", params=params, signed=True)
+        params["type"] = "STOP_MARKET"
+        return self._request("POST", "/fapi/v1/order", params=params, signed=True)
 
     def new_take_profit_order(self, **params: Any) -> Dict[str, Any]:
         """
-        Create a TAKE_PROFIT_MARKET order using the Algo Order API.
+        Create a TAKE_PROFIT_MARKET order.
         
         Required params:
         - symbol: str
@@ -267,7 +268,8 @@ class BinanceFuturesClient:
         - workingType: "MARK_PRICE" or "CONTRACT_PRICE"
         """
         self._ensure_required(params, ("symbol", "side", "stopPrice"))
-        return self._request("POST", "/fapi/v1/order/takeProfit", params=params, signed=True)
+        params["type"] = "TAKE_PROFIT_MARKET"
+        return self._request("POST", "/fapi/v1/order", params=params, signed=True)
 
     def query_order(self, **params: Any) -> Dict[str, Any]:
         self._ensure_required(params, ("symbol",))
