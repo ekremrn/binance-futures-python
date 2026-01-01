@@ -227,6 +227,48 @@ class BinanceFuturesClient:
         self._ensure_required(params, ("symbol", "side", "type"))
         return self._request("POST", "/fapi/v1/order/test", params=params, signed=True)
 
+    # ---------------------------------------------------------------------
+    # Algo Orders (SIGNED) - For STOP_MARKET and TAKE_PROFIT_MARKET
+    # ---------------------------------------------------------------------
+
+    def new_stop_loss_order(self, **params: Any) -> Dict[str, Any]:
+        """
+        Create a STOP_MARKET order using the Algo Order API.
+        
+        Required params:
+        - symbol: str
+        - side: "BUY" or "SELL"
+        - stopPrice: float or str
+        
+        Optional params:
+        - quantity: float or str (required if closePosition is not "true")
+        - closePosition: "true" or "false" (default: "false")
+        - reduceOnly: "true" or "false"
+        - priceProtect: "true" or "false"
+        - workingType: "MARK_PRICE" or "CONTRACT_PRICE"
+        """
+        self._ensure_required(params, ("symbol", "side", "stopPrice"))
+        return self._request("POST", "/fapi/v1/order/stopLoss", params=params, signed=True)
+
+    def new_take_profit_order(self, **params: Any) -> Dict[str, Any]:
+        """
+        Create a TAKE_PROFIT_MARKET order using the Algo Order API.
+        
+        Required params:
+        - symbol: str
+        - side: "BUY" or "SELL"
+        - stopPrice: float or str
+        
+        Optional params:
+        - quantity: float or str (required if closePosition is not "true")
+        - closePosition: "true" or "false" (default: "false")
+        - reduceOnly: "true" or "false"
+        - priceProtect: "true" or "false"
+        - workingType: "MARK_PRICE" or "CONTRACT_PRICE"
+        """
+        self._ensure_required(params, ("symbol", "side", "stopPrice"))
+        return self._request("POST", "/fapi/v1/order/takeProfit", params=params, signed=True)
+
     def query_order(self, **params: Any) -> Dict[str, Any]:
         self._ensure_required(params, ("symbol",))
         return self._request("GET", "/fapi/v1/order", params=params, signed=True)
