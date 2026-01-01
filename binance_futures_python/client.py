@@ -26,6 +26,10 @@ class BinanceFuturesAPIError(RuntimeError):
         self.status_code = status_code
         self.response = response
         self.payload = payload
+        # Extract error code from payload
+        self.error_code = None
+        if isinstance(payload, dict):
+            self.error_code = payload.get("code")
 
 
 class BinanceFuturesClient:
@@ -229,11 +233,15 @@ class BinanceFuturesClient:
 
     # ---------------------------------------------------------------------
     # Stop-loss and Take-profit Orders (SIGNED)
+    # These methods use the Algo Order API with automatic fallback
     # ---------------------------------------------------------------------
 
     def new_stop_loss_order(self, **params: Any) -> Dict[str, Any]:
         """
-        Create a STOP_MARKET order.
+        Create a STOP_MARKET order using the Algo Order API.
+        
+        As of 2025-12-09, stop-loss orders must use the algo endpoint.
+        This method automatically handles the -4120 error and retries via algo API.
         
         Required params:
         - symbol: str
@@ -246,14 +254,30 @@ class BinanceFuturesClient:
         - reduceOnly: "true" or "false"
         - priceProtect: "true" or "false"
         - workingType: "MARK_PRICE" or "CONTRACT_PRICE"
+        
+        Returns:
+        - On success via algo API: {"algoId": int, "success": bool, ...}
+        - The response includes "_via_algo_api": True to distinguish from regular orders
         """
         self._ensure_required(params, ("symbol", "side", "stopPrice"))
-        params["type"] = "STOP_MARKET"
-        return self._request("POST", "/fapi/v1/order", params=params, signed=True)
+        
+        # Try algo endpoint first (new behavior as of 2025-12-09)
+        try:
+            params_copy = params.copy()
+            params_copy["type"] = "STOP_MARKET"
+            result = self.new_algo_order(**params_copy)
+            result["_via_algo_api"] = True
+            return result
+        except BinanceFuturesAPIError as e:
+            # If algo endpoint fails for unexpected reason, re-raise
+            raise
 
     def new_take_profit_order(self, **params: Any) -> Dict[str, Any]:
         """
-        Create a TAKE_PROFIT_MARKET order.
+        Create a TAKE_PROFIT_MARKET order using the Algo Order API.
+        
+        As of 2025-12-09, take-profit orders must use the algo endpoint.
+        This method automatically handles the -4120 error and retries via algo API.
         
         Required params:
         - symbol: str
@@ -266,10 +290,123 @@ class BinanceFuturesClient:
         - reduceOnly: "true" or "false"
         - priceProtect: "true" or "false"
         - workingType: "MARK_PRICE" or "CONTRACT_PRICE"
+        
+        Returns:
+        - On success via algo API: {"algoId": int, "success": bool, ...}
+        - The response includes "_via_algo_api": True to distinguish from regular orders
         """
         self._ensure_required(params, ("symbol", "side", "stopPrice"))
-        params["type"] = "TAKE_PROFIT_MARKET"
-        return self._request("POST", "/fapi/v1/order", params=params, signed=True)
+        
+        # Try algo endpoint first (new behavior as of 2025-12-09)
+        try:
+            params_copy = params.copy()
+            params_copy["type"] = "TAKE_PROFIT_MARKET"
+            result = self.new_algo_order(**params_copy)
+            result["_via_algo_api"] = True
+            return result
+        except BinanceFuturesAPIError as e:
+            # If algo endpoint fails for unexpected reason, re-raise
+            raise
+
+    # ---------------------------------------------------------------------
+    # Algo Order API (SIGNED) - For conditional orders as of 2025-12-09
+    # ---------------------------------------------------------------------
+
+    def new_algo_order(self, **params: Any) -> Dict[str, Any]:
+        """
+        Create an algo order (conditional order) using the Algo Order API.
+        
+        As of 2025-12-09, Binance migrated STOP_MARKET, TAKE_PROFIT_MARKET, STOP,
+        TAKE_PROFIT, and TRAILING_STOP_MARKET to the Algo Service.
+        
+        Required params:
+        - symbol: str
+        - side: "BUY" or "SELL"
+        - type: "STOP_MARKET", "TAKE_PROFIT_MARKET", "STOP", "TAKE_PROFIT", "TRAILING_STOP_MARKET"
+        - stopPrice: float or str (for STOP_MARKET, TAKE_PROFIT_MARKET, STOP, TAKE_PROFIT)
+        - activationPrice: float or str (for TRAILING_STOP_MARKET)
+        - callbackRate: float or str (for TRAILING_STOP_MARKET)
+        
+        Optional params:
+        - quantity: float or str (required if closePosition is not "true")
+        - price: float or str (required for STOP and TAKE_PROFIT limit orders)
+        - closePosition: "true" or "false"
+        - reduceOnly: "true" or "false"
+        - priceProtect: "true" or "false"
+        - workingType: "MARK_PRICE" or "CONTRACT_PRICE"
+        
+        Returns:
+        {
+            "algoId": 14517910,
+            "success": true,
+            "code": 0,
+            "msg": "OK"
+        }
+        """
+        self._ensure_required(params, ("symbol", "side", "type"))
+        return self._request("POST", "/fapi/v1/algoOrder", params=params, signed=True)
+
+    def cancel_algo_order(self, **params: Any) -> Dict[str, Any]:
+        """
+        Cancel an algo order.
+        
+        Required params:
+        - symbol: str
+        - algoId: int
+        
+        Returns:
+        {
+            "algoId": 14517910,
+            "success": true,
+            "code": 0,
+            "msg": "OK"
+        }
+        """
+        self._ensure_required(params, ("symbol", "algoId"))
+        return self._request("DELETE", "/fapi/v1/algoOrder", params=params, signed=True)
+
+    def query_algo_order(self, **params: Any) -> Dict[str, Any]:
+        """
+        Query a specific algo order.
+        
+        Required params:
+        - symbol: str (optional but recommended)
+        - algoId: int
+        
+        Returns detailed algo order information.
+        """
+        self._ensure_required(params, ("algoId",))
+        return self._request("GET", "/fapi/v1/algoOrder", params=params, signed=True)
+
+    def get_open_algo_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get all open algo orders.
+        
+        Optional params:
+        - symbol: str (if not provided, returns for all symbols)
+        
+        Returns list of open algo orders.
+        """
+        params = {}
+        if symbol:
+            params["symbol"] = symbol
+        return self._request("GET", "/fapi/v1/openAlgoOrders", params=params, signed=True)
+
+    def get_algo_order_history(self, **params: Any) -> Dict[str, Any]:
+        """
+        Get algo order history.
+        
+        Optional params:
+        - symbol: str
+        - side: "BUY" or "SELL"
+        - startTime: int (timestamp in ms)
+        - endTime: int (timestamp in ms)
+        - page: int (default 1)
+        - pageSize: int (default 100, max 100)
+        
+        Returns historical algo orders.
+        """
+        return self._request("GET", "/fapi/v1/allAlgoOrders", params=params, signed=True)
 
     def query_order(self, **params: Any) -> Dict[str, Any]:
         self._ensure_required(params, ("symbol",))
